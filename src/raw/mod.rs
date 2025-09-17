@@ -13,6 +13,8 @@ use core::{hint, ptr};
 
 mod alloc;
 mod map;
+#[cfg(test)]
+mod map_test;
 
 #[cfg(test)]
 pub(crate) use self::alloc::AllocError;
