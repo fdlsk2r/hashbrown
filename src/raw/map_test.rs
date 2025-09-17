@@ -34,7 +34,6 @@ fn test_map() {
 
     // key不存在
     let key = 0.2233f64;
-    let key_ref = &key;
     let key_addr = (&key) as *const f64 as *const u8;
     let v1 = map.access(key_addr);
     assert!(v1.is_none());
