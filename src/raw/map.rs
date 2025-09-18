@@ -1,5 +1,5 @@
 use super::{
-    ptr, unlikely, Allocator, Fallibility, Global, Group, InsertSlot, Layout, RawTableInner,
+    ptr, unlikely, Allocator, Fallibility, Global, Group, Layout, PhantomData, RawTableInner,
     TableLayout, TryReserveError,
 };
 
@@ -16,43 +16,37 @@ impl From<Layout> for TableLayout {
     }
 }
 
-/// 哈希表中key的关键能力描述
-pub trait KeyDesc {
-    /// 描述entry.key的hash函数
-    fn hash(&self, ptr: *const u8) -> u64;
-    /// 描述entry.key的equals函数
-    fn equals(&self, a: *const u8, b: *const u8) -> bool;
-}
-
-/// 哈希表中单个entry的内存结构描述信息
-pub struct Entry<K: KeyDesc> {
-    /// K关键描述信息
-    pub key_spec: K,
-    /// K的内存大小
-    pub key_size: u32,
-    /// V的内存偏移量, K的偏移量为0
-    pub val_offset: usize,
-    /// (K, V)结构体的完整内存布局
-    pub layout: Layout,
+/// 哈希表内部的Entry规范, 用于caller注入自定义的实现细节
+pub trait EntrySpec {
+    /// 获取此entry的内存结构
+    fn layout(&self) -> Layout;
+    /// 计算此entry中Key的hash值
+    fn hash(&self, entry: *const u8) -> u64;
+    /// 计算两个entry的Key是否相等
+    fn equals(&self, entry1: *const u8, entry2: *const u8) -> bool;
+    /// 针对此entry执行Key的赋值
+    fn assign_key(&self, entry: *const u8, k: *const u8);
+    /// 获取此entry中Value的内存指针
+    fn access_value(&self, entry: *const u8) -> *const u8;
 }
 
 ///
 /// 面向原生内存的<K, V>哈希表
 ///
-pub struct RawMap<K: KeyDesc, A: Allocator = Global> {
-    entry: Entry<K>,
+pub struct RawTable2<E: EntrySpec, A: Allocator = Global> {
+    entry: E,
     /// caller可以指定自己的Allocator
     alloc: A,
     /// 内部swiss table
     inner: RawTableInner,
 }
 
-impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
+impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
     ///
     /// 构造新的哈希表, 支持指定默认cap, 若为0则视为构造空的哈希表
     ///
-    pub fn new(cap: usize, entry: Entry<K>, alloc: A) -> Result<Self, TryReserveError> {
-        let table_layout = TableLayout::from(entry.layout);
+    pub fn new(cap: usize, entry: E, alloc: A) -> Result<Self, TryReserveError> {
+        let table_layout = TableLayout::from(entry.layout());
         let inner = RawTableInner::fallible_with_capacity(
             &alloc,
             table_layout,
@@ -70,8 +64,9 @@ impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
     /// 获取`key: &K`在此map中的`value: &V`, 出入参均为K/V的有效内存指针。
     /// 它的使用场景为`map.get(key)`, 计算过程中直接使用`self.hash_fn`和`self.eq_fn`
     ///
-    pub fn access(&self, key: *const u8) -> Option<*const u8> {
-        unsafe { self.find(key).map(|o| self.bucket(o) as *const u8) }
+    pub unsafe fn access(&self, key: *const u8) -> Option<*const u8> {
+        self.find(key)
+            .map(|o| self.entry.access_value(self.bucket(o)))
     }
 
     ///
@@ -80,55 +75,35 @@ impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
     /// 它的使用场景为`map.set(key, value)`, 只是过程分为两步走:
     /// 先计算key槽位物理地址, 然后向地址内写入value；此函数只负责第一步, 即按需扩容+返回value地址, 由caller写入数据
     ///
-    pub fn assign(&mut self, key: *const u8) -> *mut u8 {
-        let hash = self.entry.key_spec.hash(key);
-        unsafe {
-            self.check_growth(1).expect("map growth failure");
+    pub unsafe fn assign(&mut self, key: *const u8) -> *const u8 {
+        self.check_growth(1).expect("map growth failure");
 
-            let ptr = match self.find_or_insert(hash, key) {
-                Ok(index) => self.bucket(index),
-                Err(slot) => {
-                    let old_ctrl = *self.inner.ctrl(slot.index);
-                    self.inner.record_item_insert_at(slot.index, old_ctrl, hash);
-                    let bucket = self.bucket(slot.index);
-                    // 将key复制进去
-                    ptr::copy_nonoverlapping(key, bucket, self.entry.key_size as usize);
-                    bucket
-                }
-            };
-            // 返回value内存地址
-            ptr.offset(self.entry.val_offset as isize)
-        }
+        let index = self.find_or_insert(key);
+        let bucket = self.bucket(index);
+        // 返回value内存地址
+        self.entry.access_value(bucket)
     }
 
     ///
     /// 将other中的所有buckets导入当前map
     ///
-    pub fn extend(&mut self, other: &Self) {
-        unsafe {
-            self.check_growth(other.len()).expect("map growth failure");
+    pub unsafe fn extend(&mut self, other: &Self) {
+        self.check_growth(other.len()).expect("map growth failure");
 
-            for index in self.inner.full_buckets_indices() {
-                let entry = self.bucket(index) as *const u8;
-                let hash = self.entry.key_spec.hash(entry);
-                let bucket = match self.find_or_insert(hash, entry) {
-                    Ok(index) => self.bucket(index),
-                    Err(slot) => {
-                        let old_ctrl = *self.inner.ctrl(slot.index);
-                        self.inner.record_item_insert_at(slot.index, old_ctrl, hash);
-                        self.bucket(slot.index)
-                    }
-                };
-                ptr::copy_nonoverlapping(entry, bucket, self.entry.layout.size())
-            }
+        let size = self.entry.layout().size();
+        for other_idx in other.inner.full_buckets_indices() {
+            let entry = other.bucket(other_idx) as *const u8;
+            let index = self.find_or_insert(entry);
+            let bucket = self.bucket(index);
+            ptr::copy_nonoverlapping(entry, bucket, size);
         }
     }
 
     ///
     /// 从当前map中删除指定key, 即将该key对应的Bucket软删除
     ///
-    pub fn delete(&mut self, key: *const u8) {
-        unsafe { self.find(key).map(|i| self.inner.erase(i)) };
+    pub unsafe fn delete(&mut self, key: *const u8) {
+        self.find(key).map(|i| self.inner.erase(i));
     }
 
     ///
@@ -143,6 +118,16 @@ impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
     ///
     pub fn len(&self) -> usize {
         self.inner.items
+    }
+
+    ///
+    /// 针对当前table派生出`map<K, V>`的便捷封装, caller需要保证内存安全性
+    ///
+    pub unsafe fn as_map<K, V>(&'_ mut self) -> RawMap<'_, K, V, E, A> {
+        RawMap {
+            table: self,
+            phantom: Default::default(),
+        }
     }
 
     ///
@@ -177,20 +162,30 @@ impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
 
     #[inline(always)]
     unsafe fn bucket(&self, index: usize) -> *mut u8 {
-        self.inner.bucket_ptr(index, self.entry.layout.size())
+        self.inner.bucket_ptr(index, self.entry.layout().size())
     }
 
     #[inline(always)]
     unsafe fn find(&self, key: *const u8) -> Option<usize> {
-        let hash = self.entry.key_spec.hash(key);
-        let mut equals = |index| self.entry.key_spec.equals(key, self.bucket(index));
+        let hash = self.entry.hash(key);
+        let mut equals = |index| self.entry.equals(key, self.bucket(index));
         self.inner.find_inner(hash, &mut equals)
     }
 
     #[inline(always)]
-    unsafe fn find_or_insert(&self, hash: u64, key: *const u8) -> Result<usize, InsertSlot> {
-        let mut equals = |index| self.entry.key_spec.equals(key, self.bucket(index));
-        self.inner.find_or_find_insert_slot_inner(hash, &mut equals)
+    unsafe fn find_or_insert(&mut self, key: *const u8) -> usize {
+        let hash = self.entry.hash(key);
+        let mut equals = |index| self.entry.equals(key, self.bucket(index));
+        match self.inner.find_or_find_insert_slot_inner(hash, &mut equals) {
+            Ok(index) => index,
+            Err(slot) => {
+                let old_ctrl = *self.inner.ctrl(slot.index);
+                self.inner.record_item_insert_at(slot.index, old_ctrl, hash);
+                let bucket = self.bucket(slot.index);
+                self.entry.assign_key(bucket, key); // write key into slot
+                slot.index
+            }
+        }
     }
 
     #[inline(always)]
@@ -209,17 +204,56 @@ impl<K: KeyDesc, A: Allocator> RawMap<K, A> {
         additional: usize,
         fallibility: Fallibility,
     ) -> Result<(), TryReserveError> {
+        let layout = self.entry.layout();
         self.inner.reserve_rehash_inner(
             &self.alloc,
             additional,
-            &|table, index| {
-                self.entry
-                    .key_spec
-                    .hash(table.bucket_ptr(index, self.entry.layout.size()))
-            },
+            &|table, index| self.entry.hash(table.bucket_ptr(index, layout.size())),
             fallibility,
-            TableLayout::from(self.entry.layout),
+            TableLayout::from(layout),
             None,
         )
+    }
+}
+
+pub struct RawMap<'a, K, V, E: EntrySpec, A: Allocator> {
+    table: &'a mut RawTable2<E, A>,
+    phantom: PhantomData<(K, V)>,
+}
+
+impl<'a, K, V, E: EntrySpec, A: Allocator> RawMap<'a, K, V, E, A> {
+    /// 获取此map中指定key的value引用
+    pub unsafe fn get(&self, key: &K) -> Option<&V> {
+        let key_ptr = key as *const K as *const u8;
+        self.table.access(key_ptr).map(|ptr| &*(ptr as *const V))
+    }
+
+    /// 将{key, value}写入此map
+    pub unsafe fn insert(&mut self, key: &K, value: V) {
+        let key_ptr = key as *const K as *const u8;
+        let val_addr = self.table.assign(key_ptr);
+        let val_mut_ref = &mut *(val_addr as *mut V);
+        *val_mut_ref = value;
+    }
+
+    /// 删除此map中指定key的entry
+    pub unsafe fn delete(&mut self, key: &K) {
+        let key_ptr = key as *const K as *const u8;
+        self.table.delete(key_ptr);
+    }
+
+    /// Merge all entries of other into this map.
+    pub unsafe fn extend(&mut self, other: &Self) {
+        self.table.extend(&other.table);
+    }
+
+    /// Clear all entries in this map.
+    pub unsafe fn clear(&mut self) {
+        self.table.clear()
+    }
+
+    /// Obtains the count of entries in this map.
+    pub fn size(&self) -> usize {
+        self.table.len()
     }
 }

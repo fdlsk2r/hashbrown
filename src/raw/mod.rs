@@ -12,7 +12,7 @@ use core::slice;
 use core::{hint, ptr};
 
 mod alloc;
-mod map;
+pub mod map;
 #[cfg(test)]
 mod map_test;
 
