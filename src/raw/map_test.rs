@@ -1,18 +1,11 @@
 use super::map::*;
 use super::Global;
-use std::alloc::Layout;
 
 #[derive(Debug, Copy, Clone)]
-pub struct Float64Key(Layout);
+pub struct Float64Spec();
 
-impl EntrySpec for Float64Key {
-    #[inline]
-    fn layout(&self) -> Layout {
-        self.0
-    }
-
-    #[inline]
-    fn hash(&self, ptr: *const u8) -> u64 {
+impl EntrySpec for Float64Spec {
+    unsafe fn hash(&self, ptr: *const u8) -> u64 {
         let p = unsafe { &*(ptr as *const f64) };
         match *p {
             0.0 => 0,
@@ -21,31 +14,35 @@ impl EntrySpec for Float64Key {
         }
     }
 
-    #[inline]
-    fn equals(&self, a: *const u8, b: *const u8) -> bool {
+    unsafe fn equals(&self, a: *const u8, b: *const u8) -> bool {
         let p1 = unsafe { &*(a as *const f64) };
         let p2 = unsafe { &*(b as *const f64) };
         p1 == p2
     }
 
-    #[inline]
-    fn access_value(&self, ptr: *const u8) -> *const u8 {
-        unsafe { ptr.offset(8) }
-    }
-
-    #[inline]
-    fn assign_key(&self, ptr: *const u8, v: *const u8) {
+    unsafe fn assign_key(&self, ptr: *const u8, v: *const u8) {
         let key_ref = unsafe { &mut *(ptr as *mut f64) };
         let key = unsafe { &*(v as *const f64) };
+        *key_ref = *key;
+    }
+
+    unsafe fn assign_value(&self, v_ptr: *const u8, other: *const u8) {
+        let key_ref = &mut *(v_ptr as *mut f64);
+        let key = &*(other as *const f64);
         *key_ref = *key;
     }
 }
 
 #[test]
 fn test_map() {
-    let entry = Float64Key(unsafe { Layout::from_size_align_unchecked(16, 8) });
-    let mut table = RawTable2::new(0, entry, Global).expect("what?");
-    let mut table2 = RawTable2::new(0, entry, Global).expect("what?");
+    let entry = Float64Spec();
+    let layout = EntryLayout {
+        size: 16,
+        voff: 8,
+        align: 8,
+    };
+    let mut table = RawTable2::new(0, layout, entry, Global).expect("what?");
+    let mut table2 = RawTable2::new(0, layout, entry, Global).expect("what?");
     assert_eq!(table.len(), 0);
 
     unsafe {
@@ -75,7 +72,7 @@ fn test_map() {
         map.clear();
         assert_eq!(map.size(), 0);
         assert_eq!(map2.size(), 10000);
-        
+
         // 针对map2迭代
     }
 }
