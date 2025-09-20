@@ -1,20 +1,7 @@
 use super::{
-    unlikely, Allocator, Fallibility, Global, Group, Layout, PhantomData, RawTableInner,
-    TableLayout, TryReserveError,
+    unlikely, Allocator, Fallibility, Global, Group, PhantomData, RawTableInner, TableLayout,
+    TryReserveError,
 };
-
-impl From<Layout> for TableLayout {
-    fn from(value: Layout) -> Self {
-        Self {
-            size: value.size(),
-            ctrl_align: if value.align() > Group::WIDTH {
-                value.align()
-            } else {
-                Group::WIDTH
-            },
-        }
-    }
-}
 
 impl From<EntryLayout> for TableLayout {
     fn from(value: EntryLayout) -> Self {
@@ -35,11 +22,17 @@ impl From<EntryLayout> for TableLayout {
 #[derive(Copy, Clone, Debug)]
 pub struct EntryLayout {
     /// Indicates the total memory size of this entry.
-    pub size: u32,
+    size: u32,
     /// Indicates where's the `V` in entry, [0...voff) is K, [voff, size) is V.
-    pub voff: u16,
+    voff: u16,
     /// Indicates the aligment of this entry, it should be usize in most cases.
-    pub align: u16,
+    align: u16,
+}
+
+impl EntryLayout {
+    pub fn new(voff: u16, align: u16, size: u32) -> Self {
+        Self { size, voff, align }
+    }
 }
 
 ///
@@ -290,4 +283,6 @@ impl<'a, K, V, E: EntrySpec, A: Allocator> RawMap<'a, K, V, E, A> {
     pub fn size(&self) -> usize {
         self.table.len()
     }
+
+    // TODO 迭代器怎么做？
 }

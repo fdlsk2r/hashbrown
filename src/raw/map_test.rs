@@ -6,7 +6,7 @@ pub struct Float64Spec();
 
 impl EntrySpec for Float64Spec {
     unsafe fn hash(&self, ptr: *const u8) -> u64 {
-        let p = unsafe { &*(ptr as *const f64) };
+        let p = &*(ptr as *const f64);
         match *p {
             0.0 => 0,
             -0.0 => 0,
@@ -14,15 +14,15 @@ impl EntrySpec for Float64Spec {
         }
     }
 
-    unsafe fn equals(&self, a: *const u8, b: *const u8) -> bool {
-        let p1 = unsafe { &*(a as *const f64) };
-        let p2 = unsafe { &*(b as *const f64) };
+    unsafe fn equals(&self, k1: *const u8, k2: *const u8) -> bool {
+        let p1 = &*(k1 as *const f64);
+        let p2 = &*(k2 as *const f64);
         p1 == p2
     }
 
-    unsafe fn assign_key(&self, ptr: *const u8, v: *const u8) {
-        let key_ref = unsafe { &mut *(ptr as *mut f64) };
-        let key = unsafe { &*(v as *const f64) };
+    unsafe fn assign_key(&self, k_ptr: *const u8, other: *const u8) {
+        let key_ref = &mut *(k_ptr as *mut f64);
+        let key = &*(other as *const f64);
         *key_ref = *key;
     }
 
@@ -36,11 +36,7 @@ impl EntrySpec for Float64Spec {
 #[test]
 fn test_map() {
     let entry = Float64Spec();
-    let layout = EntryLayout {
-        size: 16,
-        voff: 8,
-        align: 8,
-    };
+    let layout = EntryLayout::new(8, 8, 16);
     let mut table = RawTable2::new(0, layout, entry, Global).expect("what?");
     let mut table2 = RawTable2::new(0, layout, entry, Global).expect("what?");
     assert_eq!(table.len(), 0);
