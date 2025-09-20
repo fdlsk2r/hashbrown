@@ -2,6 +2,7 @@ use super::{
     unlikely, Allocator, Fallibility, Global, Group, PhantomData, RawTableInner, TableLayout,
     TryReserveError,
 };
+use crate::control::BitMaskIter;
 
 impl From<EntryLayout> for TableLayout {
     fn from(value: EntryLayout) -> Self {
@@ -49,15 +50,24 @@ pub trait EntrySpec {
     unsafe fn assign_value(&self, v_ptr: *const u8, other: *const u8);
 }
 
+pub struct RawCursor {
+    /// The start index of current group.
+    group_index: usize,
+    /// The elements within the group with a matching tag-hash.
+    group_bitmask: BitMaskIter,
+}
+
 ///
-/// 面向原生内存的<K, V>哈希表
+/// The underline raw-memory swiss-table.
 ///
 pub struct RawTable2<E: EntrySpec, A: Allocator = Global> {
+    /// Indicates entry's memory layout.
     layout: EntryLayout,
+    /// EntrySpec's implementation
     spec: E,
-    /// caller可以指定自己的Allocator
+    /// The memory allocator that indicated by caller.
     alloc: A,
-    /// 内部swiss table
+    /// The inner underline swiss-table implementation.
     inner: RawTableInner,
 }
 
@@ -104,7 +114,8 @@ impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
     pub unsafe fn assign(&mut self, key: *const u8) -> *const u8 {
         self.check_growth(1).expect("map growth failure");
 
-        let index = self.find_or_insert(key);
+        // find insert/update bucket
+        let index = self.find_for_insert(key);
         let ptr = self.bucket(index);
         // move pointer to value's offset
         ptr.add(self.layout.voff as usize)
@@ -116,9 +127,10 @@ impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
     pub unsafe fn extend(&mut self, other: &Self) {
         self.check_growth(other.len()).expect("map growth failure");
 
+        // clone all entries into current table
         for other_idx in other.inner.full_buckets_indices() {
             let other_bucket = other.bucket(other_idx);
-            let index = self.find_or_insert(other_bucket);
+            let index = self.find_for_insert(other_bucket);
             let bucket = self.bucket(index);
             let v_ptr = bucket.add(self.layout.voff as usize);
             let other_v_ptr = other_bucket.add(self.layout.voff as usize);
@@ -154,6 +166,37 @@ impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
         RawMap {
             table: self,
             phantom: Default::default(),
+        }
+    }
+
+    /// Create new iterator's cursor for current table.
+    pub unsafe fn iter_new(&self) -> RawCursor {
+        RawCursor {
+            group_index: 0,
+            group_bitmask: unsafe {
+                let group_ptr = self.inner.ctrl(0);
+                Group::load_aligned(group_ptr).match_full().into_iter()
+            },
+        }
+    }
+
+    ///
+    pub unsafe fn iter_next(&self, cursor: &mut RawCursor) -> Option<*const u8> {
+        loop {
+            if let Some(bit) = cursor.group_bitmask.next() {
+                let index = cursor.group_index + bit;
+                return Some(self.bucket(index));
+            }
+            cursor.group_index += Group::WIDTH;
+            // Check if we hit the end
+            if cursor.group_index >= self.inner.buckets() {
+                return None;
+            }
+            // Update next group's bitmask
+            cursor.group_bitmask = unsafe {
+                let group_ptr = self.inner.ctrl(cursor.group_index);
+                Group::load_aligned(group_ptr).match_full().into_iter()
+            };
         }
     }
 
@@ -200,7 +243,7 @@ impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
     }
 
     #[inline(always)]
-    unsafe fn find_or_insert(&mut self, key: *const u8) -> usize {
+    unsafe fn find_for_insert(&mut self, key: *const u8) -> usize {
         let hash = self.spec.hash(key);
         let mut equals = |index| self.spec.equals(key, self.bucket(index));
         match self.inner.find_or_find_insert_slot_inner(hash, &mut equals) {
@@ -243,19 +286,31 @@ impl<E: EntrySpec, A: Allocator> RawTable2<E, A> {
     }
 }
 
+impl<E: EntrySpec, A: Allocator> Drop for RawTable2<E, A> {
+    #[cfg_attr(feature = "inline-more", inline)]
+    fn drop(&mut self) {
+        unsafe {
+            self.inner.free_buckets(&self.alloc, self.layout.into());
+        }
+    }
+}
+
+///
+/// The unsafe <K, V> mapping for `RawTable2`, caller should be responsible for memory safety.
+///
 pub struct RawMap<'a, K, V, E: EntrySpec, A: Allocator> {
     table: &'a mut RawTable2<E, A>,
     phantom: PhantomData<(K, V)>,
 }
 
 impl<'a, K, V, E: EntrySpec, A: Allocator> RawMap<'a, K, V, E, A> {
-    /// 获取此map中指定key的value引用
+    /// Obtains value's ref by specified key.
     pub unsafe fn get(&self, key: &K) -> Option<&V> {
         let key_ptr = key as *const K as *const u8;
         self.table.access(key_ptr).map(|ptr| &*(ptr as *const V))
     }
 
-    /// 将{key, value}写入此map
+    /// Insert new entry(key, value) into current swiss table.
     pub unsafe fn insert(&mut self, key: &K, value: V) {
         let key_ptr = key as *const K as *const u8;
         let val_addr = self.table.assign(key_ptr);
@@ -263,7 +318,7 @@ impl<'a, K, V, E: EntrySpec, A: Allocator> RawMap<'a, K, V, E, A> {
         *val_mut_ref = value;
     }
 
-    /// 删除此map中指定key的entry
+    /// Delete entry from this map by the specified key.
     pub unsafe fn delete(&mut self, key: &K) {
         let key_ptr = key as *const K as *const u8;
         self.table.delete(key_ptr);
@@ -279,10 +334,21 @@ impl<'a, K, V, E: EntrySpec, A: Allocator> RawMap<'a, K, V, E, A> {
         self.table.clear()
     }
 
+    /// Iterator: create a new iterator cursor, which is started with 0
+    pub unsafe fn iter_new(&self) -> RawCursor {
+        self.table.iter_new()
+    }
+
+    /// Iterator: obtains next entry and move the cursor
+    pub unsafe fn iter_next(&mut self, cursor: &mut RawCursor) -> Option<(&K, &V)> {
+        let bucket = self.table.iter_next(cursor)?;
+        let key = &*(bucket as *const K);
+        let value = &*(bucket.add(self.table.layout.voff as usize) as *const V);
+        Some((key, value))
+    }
+
     /// Obtains the count of entries in this map.
     pub fn size(&self) -> usize {
         self.table.len()
     }
-
-    // TODO 迭代器怎么做？
 }

@@ -70,5 +70,12 @@ fn test_map() {
         assert_eq!(map2.size(), 10000);
 
         // 针对map2迭代
+        let mut cursor = map2.iter_new();
+        let mut times = 0;
+        while let Some((k, v)) = map2.iter_next(&mut cursor) {
+            assert_eq!(k, v);
+            times += 1;
+        }
+        assert_eq!(map2.size(), times);
     }
 }
