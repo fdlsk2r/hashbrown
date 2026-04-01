@@ -12,6 +12,10 @@ use core::slice;
 use core::{hint, ptr};
 
 mod alloc;
+pub mod map;
+#[cfg(test)]
+mod map_test;
+
 #[cfg(test)]
 pub(crate) use self::alloc::AllocError;
 pub(crate) use self::alloc::{do_alloc, Allocator, Global};
