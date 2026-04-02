@@ -69,7 +69,7 @@ mod macros;
 
 mod control;
 mod hasher;
-mod raw;
+pub mod raw;
 mod util;
 
 mod external_trait_impls;

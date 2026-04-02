@@ -12,9 +12,11 @@ use core::slice;
 use core::{hint, ptr};
 
 mod alloc;
-pub mod map;
+
+pub mod raw_map;
 #[cfg(test)]
-mod map_test;
+mod raw_map_test;
+pub mod raw_table;
 
 #[cfg(test)]
 pub(crate) use self::alloc::AllocError;
