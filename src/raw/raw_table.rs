@@ -1,10 +1,10 @@
-use super::{
-    likely, Allocator, Fallibility, Global, Group, RawTableInner, TableLayout, TryReserveError,
-};
-use crate::control::{BitMaskIter, Tag};
+use super::alloc::{Allocator, Global};
+use super::{Fallibility, RawTableInner, TableLayout};
+use crate::control::{BitMaskIter, Group, Tag};
+use crate::{util, TryReserveError};
 use core::ptr::NonNull;
 
-/// 参考[`TableLayout::new`]函数实现的，Layout转换函数。
+/// 参考[`TableLayout::new`]函数实现的Layout转换函数。
 ///
 /// 使用方需要提供标准的`Layout`来描述哈希表中`Bucket, Entry, (K, V)`的内存结构。
 impl From<core::alloc::Layout> for TableLayout {
@@ -37,11 +37,11 @@ impl Default for RawTableIter {
 impl RawTableIter {
     const _ASSERT_SIZE: () = assert!(
         size_of::<Self>() == 16,
-        "RawTable2Iter MUST be exactly 16 bytes for VM stack compatibility"
+        "RawTableIter MUST be exactly 16 bytes"
     );
     const _ASSERT_ALIGN: () = assert!(
         align_of::<Self>() == 8,
-        "RawTable2Iter MUST be 8-byte aligned"
+        "RawTableIter MUST be 8-byte aligned"
     );
 
     /// 创建新迭代器
@@ -187,7 +187,7 @@ impl<A: Allocator> RawTable<A> {
         additional: usize,
         hash_fn: impl Fn(NonNull<u8>) -> u64,
     ) -> Result<(), TryReserveError> {
-        if likely(additional <= self.inner.growth_left) {
+        if util::likely(additional <= self.inner.growth_left) {
             return Ok(());
         }
         let size = self.layout.size;
