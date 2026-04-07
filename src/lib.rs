@@ -69,7 +69,7 @@ mod macros;
 
 mod control;
 mod hasher;
-pub mod raw;
+mod raw;
 mod util;
 
 mod external_trait_impls;
@@ -85,6 +85,8 @@ mod table;
 pub use crate::hasher::DefaultHashBuilder;
 #[cfg(feature = "default-hasher")]
 pub use crate::hasher::DefaultHasher;
+
+pub use raw::raw_table;
 
 pub mod hash_map {
     //! A hash map implemented with quadratic probing and SIMD lookup.

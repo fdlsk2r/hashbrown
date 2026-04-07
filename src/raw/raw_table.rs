@@ -17,23 +17,50 @@ impl From<core::alloc::Layout> for TableLayout {
 }
 
 /// 底层swiss-table的槽位迭代器，负责跟踪迭代状态。
-pub struct RawTable2Iter {
-    /// The start index of current group.
-    group_index: usize,
-    /// The elements within the group with a matching tag-hash.
-    group_bitmask: BitMaskIter,
+///
+/// 内存布局: 严格采用`8B align + 16B size`, 即可以绝对安全地采用`[0u64; 2]`作为初始迭代状态。
+#[repr(C)]
+#[repr(align(8))]
+pub struct RawTableIter {
+    /// 下一个将要加载的`Group`的起始索引
+    next_group_index: u64,
+    /// 正在消耗的`Group`的有效位图, 在不同的平台上，其可能是`u16/u64`。
+    current_bitmask: BitMaskIter,
+}
+
+impl Default for RawTableIter {
+    fn default() -> Self {
+        Self::new_zeroed()
+    }
+}
+
+impl RawTableIter {
+    const _ASSERT_SIZE: () = assert!(
+        size_of::<Self>() == 16,
+        "RawTable2Iter MUST be exactly 16 bytes for VM stack compatibility"
+    );
+    const _ASSERT_ALIGN: () = assert!(
+        align_of::<Self>() == 8,
+        "RawTable2Iter MUST be 8-byte aligned"
+    );
+
+    /// 创建新迭代器
+    #[inline(always)]
+    pub const fn new_zeroed() -> Self {
+        unsafe { core::mem::transmute([0u64; 2]) }
+    }
 }
 
 ///
 /// The underline raw-memory swiss-table.
 ///
-pub struct RawTable2<A: Allocator = Global> {
+pub struct RawTable<A: Allocator = Global> {
     alloc: A,
     inner: RawTableInner,
     layout: TableLayout,
 }
 
-impl<A: Allocator> RawTable2<A> {
+impl<A: Allocator> RawTable<A> {
     ///
     /// 构造新的哈希表, 支持指定默认cap, 若为0则视为构造空的哈希表
     ///
@@ -133,35 +160,21 @@ impl<A: Allocator> RawTable2<A> {
         None
     }
 
-    /// Create new iterator's cursor for current table.
-    pub unsafe fn iter_init(&self) -> RawTable2Iter {
-        let first_group = unsafe {
-            let group_ptr = self.inner.ctrl(0);
-            Group::load_aligned(group_ptr).match_full().into_iter()
-        };
-        RawTable2Iter {
-            group_index: 0,
-            group_bitmask: first_group,
-        }
-    }
-
     /// Advance the Iter, find and return the next Bucket's raw pointer.
-    pub unsafe fn iter_next(&self, cursor: &mut RawTable2Iter) -> Option<usize> {
+    pub unsafe fn iter_next(&self, cursor: &mut RawTableIter) -> Option<usize> {
         loop {
-            if let Some(bit) = cursor.group_bitmask.next() {
-                let index = cursor.group_index + bit;
-                return Some(index);
+            if let Some(bit) = cursor.current_bitmask.next() {
+                let base_index = (cursor.next_group_index as usize) - Group::WIDTH;
+                return Some(base_index + bit);
             }
-            cursor.group_index += Group::WIDTH;
-            // Check if we hit the end
-            if cursor.group_index >= self.inner.buckets() {
+            if (cursor.next_group_index as usize) >= self.inner.buckets() {
                 return None;
             }
-            // Update next group's bitmask
-            cursor.group_bitmask = unsafe {
-                let group_ptr = self.inner.ctrl(cursor.group_index);
+            cursor.current_bitmask = unsafe {
+                let group_ptr = self.inner.ctrl(cursor.next_group_index as usize);
                 Group::load_aligned(group_ptr).match_full().into_iter()
             };
+            cursor.next_group_index += Group::WIDTH as u64;
         }
     }
 
@@ -205,7 +218,7 @@ impl<A: Allocator> RawTable2<A> {
     }
 }
 
-impl<A: Allocator> Drop for RawTable2<A> {
+impl<A: Allocator> Drop for RawTable<A> {
     #[cfg_attr(feature = "inline-more", inline)]
     fn drop(&mut self) {
         unsafe {

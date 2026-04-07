@@ -1,22 +1,22 @@
+use super::alloc::{Allocator, Global};
 use super::raw_table::*;
-use crate::DefaultHashBuilder;
-use allocator_api2::alloc::{Allocator, Global};
+use crate::hasher::DefaultHashBuilder;
 use core::hash::{BuildHasher, Hash, Hasher};
 use core::marker::PhantomData;
 
-/// The unsafe `Map<K, V>` mapping for [`RawTable2`], used for test convenience.
+/// The unsafe `Map<K, V>` mapping for [`RawTable`], used for test convenience.
 pub struct RawMap<K: Hash + Eq, V, A: Allocator = Global> {
-    table: RawTable2<A>,
+    table: RawTable<A>,
     hash_builder: DefaultHashBuilder,
     phantom: PhantomData<(K, V)>,
 }
 
 impl<K: Hash + Eq, V> RawMap<K, V, Global> {
-    /// Create new `RawMap<K, V>` based on [`RawTable2`], use Global::default as allocator.
+    /// Create new `RawMap<K, V>` based on [`RawTable`], use Global::default as allocator.
     pub fn new(cap: usize) -> Self {
         let layout = core::alloc::Layout::new::<(K, V)>();
         RawMap {
-            table: RawTable2::new(cap, layout.into(), Global::default()).expect("heap overflow"),
+            table: RawTable::new(cap, layout.into(), Global::default()).expect("heap overflow"),
             hash_builder: DefaultHashBuilder::default(),
             phantom: Default::default(),
         }
@@ -24,11 +24,11 @@ impl<K: Hash + Eq, V> RawMap<K, V, Global> {
 }
 
 impl<K: Hash + Eq, V, A: Allocator> RawMap<K, V, A> {
-    /// Create new `RawMap<K, V>` based on [`RawTable2`], use specified allocator.
+    /// Create new `RawMap<K, V>` based on [`RawTable`], use specified allocator.
     pub fn new_in(cap: usize, alloc: A) -> Self {
         let layout = core::alloc::Layout::new::<(K, V)>();
         RawMap {
-            table: RawTable2::new(cap, layout.into(), alloc).expect("heap overflow"),
+            table: RawTable::new(cap, layout.into(), alloc).expect("heap overflow"),
             hash_builder: DefaultHashBuilder::default(),
             phantom: Default::default(),
         }
@@ -86,7 +86,7 @@ impl<K: Hash + Eq, V, A: Allocator> RawMap<K, V, A> {
         self.check_growth(other.table.len());
 
         // clone all entries into current table
-        let mut it = other.table.iter_init();
+        let mut it = RawTableIter::new_zeroed();
         while let Some(slot) = other.table.iter_next(&mut it) {
             let other_entry = other.table.bucket(slot).cast::<(K, V)>();
             // find the insert/update slot
@@ -115,7 +115,7 @@ impl<K: Hash + Eq, V, A: Allocator> RawMap<K, V, A> {
     pub fn iter(&self) -> RawMapIter<'_, K, V, A> {
         RawMapIter {
             table: &self.table,
-            iter: unsafe { self.table.iter_init() },
+            iter: RawTableIter::new_zeroed(),
             phantom: PhantomData,
         }
     }
@@ -124,7 +124,7 @@ impl<K: Hash + Eq, V, A: Allocator> RawMap<K, V, A> {
     #[inline(always)]
     pub fn clear(&mut self) {
         unsafe {
-            let mut it = self.table.iter_init();
+            let mut it = RawTableIter::new_zeroed();
             while let Some(slot) = self.table.iter_next(&mut it) {
                 self.table.bucket(slot).cast::<(K, V)>().drop_in_place();
             }
@@ -132,11 +132,13 @@ impl<K: Hash + Eq, V, A: Allocator> RawMap<K, V, A> {
         self.table.clear();
     }
 
+    ///
     #[inline(always)]
     pub fn size(&self) -> usize {
         self.table.len()
     }
 
+    ///
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.size() == 0
@@ -170,8 +172,8 @@ impl<K: Hash + Eq, V, A: Allocator> Drop for RawMap<K, V, A> {
 
 /// `RawMap<K, V>`迭代器
 pub struct RawMapIter<'a, K, V, A: Allocator> {
-    iter: RawTable2Iter,
-    table: &'a RawTable2<A>,
+    iter: RawTableIter,
+    table: &'a RawTable<A>,
     phantom: PhantomData<(&'a K, &'a V)>,
 }
 
