@@ -13,9 +13,11 @@ use core::{hint, ptr};
 
 mod alloc;
 
-pub mod raw_map;
+#[cfg(feature = "default-hasher")]
+mod raw_map;
 #[cfg(test)]
 mod raw_map_test;
+
 pub mod raw_table;
 
 #[cfg(test)]

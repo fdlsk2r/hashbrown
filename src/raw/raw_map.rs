@@ -1,6 +1,6 @@
 use super::alloc::{Allocator, Global};
 use super::raw_table::*;
-use crate::hasher::DefaultHashBuilder;
+use crate::DefaultHashBuilder;
 use core::hash::{BuildHasher, Hash, Hasher};
 use core::marker::PhantomData;
 
